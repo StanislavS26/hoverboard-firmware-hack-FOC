@@ -161,7 +161,6 @@ static int16_t    speed;                // local variable for speed. -1000 to 10
 #endif
 
 static uint32_t    buzzerTimer_prev = 0;
-static uint32_t    inactivity_timeout_counter;
 static MultipleTap MultipleTapBrake;    // define multiple tap functionality for the Brake pedal
 
 static uint16_t rate = RATE; // Adjustable rate to support multiple drive modes on startup
@@ -239,8 +238,8 @@ int main(void) {
     printf("Drive mode %i selected: max_speed:%i acc_rate:%i \r\n", drive_mode, max_speed, rate);
   #endif
 
-  // Loop until button is released
-  while(HAL_GPIO_ReadPin(BUTTON_PORT, BUTTON_PIN)) { HAL_Delay(10); }
+  // Button-wait loop removed: button pin is permanently bridged (GoKart use case).
+  // Board starts immediately on battery connect; ESP32 controls power-on timing.
 
   #ifdef MULTI_MODE_DRIVE
     // Wait until triggers are released. Exit if timeout elapses (to unblock if the inputs are not calibrated)
@@ -543,7 +542,7 @@ int main(void) {
     #endif
 
     // ####### POWEROFF BY POWER-BUTTON #######
-    poweroffPressCheck();
+    // poweroffPressCheck() removed: button is permanently bridged (GoKart use case)
 
     // ####### BEEP AND EMERGENCY POWEROFF #######
     if (TEMP_POWEROFF_ENABLE && board_temp_deg_c >= TEMP_POWEROFF && speedAvgAbs < 20){  // poweroff before mainboard burns OR low bat 3
@@ -580,26 +579,9 @@ int main(void) {
     }
 
 
-    inactivity_timeout_counter++;
-
     // ####### INACTIVITY TIMEOUT #######
-    if (abs(cmdL) > 50 || abs(cmdR) > 50) {
-      inactivity_timeout_counter = 0;
-    }
-
-    #if defined(CRUISE_CONTROL_SUPPORT) || defined(STANDSTILL_HOLD_ENABLE)
-      if ((abs(rtP_Left.n_cruiseMotTgt)  > 50 && rtP_Left.b_cruiseCtrlEna) || 
-          (abs(rtP_Right.n_cruiseMotTgt) > 50 && rtP_Right.b_cruiseCtrlEna)) {
-        inactivity_timeout_counter = 0;
-      }
-    #endif
-
-    if (inactivity_timeout_counter > (INACTIVITY_TIMEOUT * 60 * 1000) / (DELAY_IN_MAIN_LOOP + 1)) {  // rest of main loop needs maybe 1ms
-      #if defined(DEBUG_SERIAL_USART2) || defined(DEBUG_SERIAL_USART3)
-        printf("Powering off, wheels were inactive for too long\r\n");
-      #endif
-      poweroff();
-    }
+    // Inactivity timeout poweroff removed: board runs indefinitely until powered off
+    // externally by the ESP32 (GoKart use case).
 
 
     // HAL_GPIO_TogglePin(LED_PORT, LED_PIN);                 // This is to measure the main() loop duration with an oscilloscope connected to LED_PIN

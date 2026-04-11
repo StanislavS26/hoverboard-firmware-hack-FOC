@@ -117,18 +117,37 @@ int16_t cmdR;                    // global variable for Right Command
 // Local variables
 //------------------------------------------------------------------------
 #if defined(FEEDBACK_SERIAL_USART2) || defined(FEEDBACK_SERIAL_USART3)
+// SerialFeedback layout (26 bytes @ 115200 baud = ~2.3 ms, sent every 10 ms via DMA):
+//   Bytes  0- 1  start        : frame start marker 0xABCD
+//   Bytes  2- 3  cmd1         : input1 command      [-1000, 1000]
+//   Bytes  4- 5  cmd2         : input2 command      [-1000, 1000]
+//   Bytes  6- 7  speedR_meas  : right motor speed   [rpm]
+//   Bytes  8- 9  speedL_meas  : left  motor speed   [rpm]
+//   Bytes 10-11  batVoltage   : battery voltage * 100  (e.g. 3600 = 36.00 V)
+//   Bytes 12-13  boardTemp    : board temperature * 10 (e.g. 358  = 35.8 degC)
+//   Bytes 14-15  cmdLed       : LED / sideboard flags bitmask
+//   ---- Extended fields (HOV-ESP32 EXTENDED_FEEDBACK compatible) ----
+//   Bytes 16-17  left_dc_curr : left  motor DC bus current * 100 (e.g. 150 = 1.50 A)
+//   Bytes 18-19  right_dc_curr: right motor DC bus current * 100
+//   Byte  20     errCodeL     : left  motor error bitmask (0=OK,1=Hall000,2=Hall111,4=Stall)
+//   Byte  21     errCodeR     : right motor error bitmask (same as errCodeL)
+//   Bytes 22-23  checksum     : XOR of all fields above
 typedef struct{
-  uint16_t  start;
-  int16_t   cmd1;
-  int16_t   cmd2;
-  int16_t   speedR_meas;
-  int16_t   speedL_meas;
-  int16_t   batVoltage;
-  int16_t   boardTemp;
-  int16_t   left_dc_curr;    // NEU: Left DC Link Current * 100
-  int16_t   right_dc_curr;   // NEU: Right DC Link Current * 100
-  uint16_t  cmdLed;
-  uint16_t  checksum;
+  // ---- EFeru original fields (unchanged) ----
+  uint16_t  start;           // 0xABCD frame marker
+  int16_t   cmd1;            // input1 command       [-1000, 1000]
+  int16_t   cmd2;            // input2 command       [-1000, 1000]
+  int16_t   speedR_meas;     // right motor speed    [rpm]
+  int16_t   speedL_meas;     // left  motor speed    [rpm]
+  int16_t   batVoltage;      // battery voltage * 100
+  int16_t   boardTemp;       // board temperature * 10
+  uint16_t  cmdLed;          // LED / sideboard flags
+  // ---- Extended fields ----
+  int16_t   left_dc_curr;    // left  motor DC bus current * 100
+  int16_t   right_dc_curr;   // right motor DC bus current * 100
+  uint8_t   errCodeL;        // left  motor error bitmask
+  uint8_t   errCodeR;        // right motor error bitmask
+  uint16_t  checksum;        // XOR over all fields above
 } SerialFeedback;
 static SerialFeedback Feedback;
 #endif
@@ -489,20 +508,46 @@ int main(void) {
     dc_curr       = left_dc_curr + right_dc_curr;            // Total DC Link Current * 100
 
     // ####### DEBUG SERIAL OUT #######
+    // Output format:
+    // "in1:%i in2:%i cmdL:%i cmdR:%i BatADC:%i BatV:%i TempADC:%i Temp:%i iL:%i iR:%i errL:%i errR:%i\r\n"
+    //  1: in1      - raw INPUT1 (ADC, UART, PPM, iBUS)
+    //  2: in2      - raw INPUT2
+    //  3: cmdL     - Left motor command [-1000, 1000]
+    //  4: cmdR     - Right motor command [-1000, 1000]
+    //  5: BatADC   - Battery raw ADC value (use for BAT_CALIB_ADC)
+    //  6: BatV     - Battery calibrated voltage * 100 (e.g. 3600 = 36.00 V)
+    //  7: TempADC  - Temperature raw ADC value (use for TEMP_CAL_LOW/HIGH_ADC)
+    //  8: Temp     - Board temperature * 10 (e.g. 358 = 35.8 degC)
+    //  9: iL       - Left  motor DC bus current * 100 (e.g. 150 = 1.50 A)
+    // 10: iR       - Right motor DC bus current * 100 (e.g. 150 = 1.50 A)
+    // 11: errL     - Left  motor error code (bitmask):
+    //                  0 = no error
+    //                  1 = Hall state 000 (all sensors low, wiring fault)
+    //                  2 = Hall state 111 (all sensors high, wiring fault)
+    //                  3 = bits 0+1: both Hall fault conditions active
+    //                  4 = motor standstill detected with high input target (stall / blocked rotor)
+    //                  5 = bits 0+2
+    //                  6 = bits 1+2
+    //                  7 = bits 0+1+2: all faults
+    // 12: errR     - Right motor error code (same bitmask as errL)
     #if defined(DEBUG_SERIAL_USART2) || defined(DEBUG_SERIAL_USART3)
       if (main_loop_counter % 25 == 0) {    // Send data periodically every 125 ms      
         #if defined(DEBUG_SERIAL_PROTOCOL)
           process_debug();
         #else
-          printf("in1:%i in2:%i cmdL:%i cmdR:%i BatADC:%i BatV:%i TempADC:%i Temp:%i \r\n",
-            input1[inIdx].raw,        // 1: INPUT1
-            input2[inIdx].raw,        // 2: INPUT2
-            cmdL,                     // 3: output command: [-1000, 1000]
-            cmdR,                     // 4: output command: [-1000, 1000]
-            adc_buffer.batt1,         // 5: for battery voltage calibration
-            batVoltageCalib,          // 6: for verifying battery voltage calibration
-            board_temp_adcFilt,       // 7: for board temperature calibration
-            board_temp_deg_c);        // 8: for verifying board temperature calibration
+          printf("in1:%i in2:%i cmdL:%i cmdR:%i BatADC:%i BatV:%i TempADC:%i Temp:%i iL:%i iR:%i errL:%i errR:%i \r\n",
+            input1[inIdx].raw,        //  1: INPUT1
+            input2[inIdx].raw,        //  2: INPUT2
+            cmdL,                     //  3: output command: [-1000, 1000]
+            cmdR,                     //  4: output command: [-1000, 1000]
+            adc_buffer.batt1,         //  5: for battery voltage calibration
+            batVoltageCalib,          //  6: for verifying battery voltage calibration
+            board_temp_adcFilt,       //  7: for board temperature calibration
+            board_temp_deg_c,         //  8: for verifying board temperature calibration
+            left_dc_curr,             //  9: Left  DC bus current * 100
+            right_dc_curr,            // 10: Right DC bus current * 100
+            rtY_Left.z_errCode,       // 11: Left  motor error code (see legend above)
+            rtY_Right.z_errCode);     // 12: Right motor error code (see legend above)
         #endif
       }
     #endif
@@ -510,31 +555,38 @@ int main(void) {
     // ####### FEEDBACK SERIAL OUT #######
     #if defined(FEEDBACK_SERIAL_USART2) || defined(FEEDBACK_SERIAL_USART3)
       if (main_loop_counter % 2 == 0) {    // Send data periodically every 10 ms
-        Feedback.start	        = (uint16_t)SERIAL_START_FRAME;
-        Feedback.cmd1           = (int16_t)input1[inIdx].cmd;
-        Feedback.cmd2           = (int16_t)input2[inIdx].cmd;
-        Feedback.speedR_meas	  = (int16_t)rtY_Right.n_mot;
-        Feedback.speedL_meas	  = (int16_t)rtY_Left.n_mot;
-        Feedback.batVoltage	    = (int16_t)batVoltageCalib;
-        Feedback.boardTemp	    = (int16_t)board_temp_deg_c;
-        Feedback.left_dc_curr   = (int16_t)left_dc_curr;     // NEU
-        Feedback.right_dc_curr  = (int16_t)right_dc_curr;    // NEU
+        Feedback.start         = (uint16_t)SERIAL_START_FRAME;
+        Feedback.cmd1          = (int16_t)input1[inIdx].cmd;
+        Feedback.cmd2          = (int16_t)input2[inIdx].cmd;
+        Feedback.speedR_meas   = (int16_t)rtY_Right.n_mot;
+        Feedback.speedL_meas   = (int16_t)rtY_Left.n_mot;
+        Feedback.batVoltage    = (int16_t)batVoltageCalib;
+        Feedback.boardTemp     = (int16_t)board_temp_deg_c;
+        // cmdLed is set per-UART below (sideboard_leds_L / _R)
+        Feedback.left_dc_curr  = (int16_t)left_dc_curr;
+        Feedback.right_dc_curr = (int16_t)right_dc_curr;
+        Feedback.errCodeL      = (uint8_t)rtY_Left.z_errCode;
+        Feedback.errCodeR      = (uint8_t)rtY_Right.z_errCode;
 
         #if defined(FEEDBACK_SERIAL_USART2)
           if(__HAL_DMA_GET_COUNTER(huart2.hdmatx) == 0) {
-            Feedback.cmdLed     = (uint16_t)sideboard_leds_L;
-            Feedback.checksum   = (uint16_t)(Feedback.start ^ Feedback.cmd1 ^ Feedback.cmd2 ^ Feedback.speedR_meas ^ Feedback.speedL_meas 
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.left_dc_curr ^ Feedback.right_dc_curr ^ Feedback.cmdLed);
-
+            Feedback.cmdLed   = (uint16_t)sideboard_leds_L;
+            Feedback.checksum = (uint16_t)(Feedback.start    ^ Feedback.cmd1         ^ Feedback.cmd2
+                                         ^ Feedback.speedR_meas ^ Feedback.speedL_meas
+                                         ^ Feedback.batVoltage  ^ Feedback.boardTemp  ^ Feedback.cmdLed
+                                         ^ Feedback.left_dc_curr ^ Feedback.right_dc_curr
+                                         ^ Feedback.errCodeL    ^ Feedback.errCodeR);
             HAL_UART_Transmit_DMA(&huart2, (uint8_t *)&Feedback, sizeof(Feedback));
           }
         #endif
         #if defined(FEEDBACK_SERIAL_USART3)
           if(__HAL_DMA_GET_COUNTER(huart3.hdmatx) == 0) {
-            Feedback.cmdLed     = (uint16_t)sideboard_leds_R;
-            Feedback.checksum   = (uint16_t)(Feedback.start ^ Feedback.cmd1 ^ Feedback.cmd2 ^ Feedback.speedR_meas ^ Feedback.speedL_meas 
-                                           ^ Feedback.batVoltage ^ Feedback.boardTemp ^ Feedback.left_dc_curr ^ Feedback.right_dc_curr ^ Feedback.cmdLed);
-
+            Feedback.cmdLed   = (uint16_t)sideboard_leds_R;
+            Feedback.checksum = (uint16_t)(Feedback.start    ^ Feedback.cmd1         ^ Feedback.cmd2
+                                         ^ Feedback.speedR_meas ^ Feedback.speedL_meas
+                                         ^ Feedback.batVoltage  ^ Feedback.boardTemp  ^ Feedback.cmdLed
+                                         ^ Feedback.left_dc_curr ^ Feedback.right_dc_curr
+                                         ^ Feedback.errCodeL    ^ Feedback.errCodeR);
             HAL_UART_Transmit_DMA(&huart3, (uint8_t *)&Feedback, sizeof(Feedback));
           }
         #endif
